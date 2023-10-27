@@ -57,7 +57,6 @@ fn decode_dictionary_value(encoded_value: &str) -> Result<DecodeResult, Error> {
     let mut rest = &encoded_value[1..];
 
     let mut m = Map::new();
-    let mut v: Vec<serde_json::Value> = vec![];
 
     if let Some(e) = rest.chars().next_back() {
         if e != 'e' {
@@ -72,31 +71,12 @@ fn decode_dictionary_value(encoded_value: &str) -> Result<DecodeResult, Error> {
             break;
         }
 
-        let DecodeResult(decoded_value, new_rest) = decode_bencoded_value(rest)?;
-        v.push(decoded_value);
+        let DecodeResult(key, new_rest) = decode_bencoded_value(rest)?;
+
+        let DecodeResult(value, new_rest) = decode_bencoded_value(new_rest)?;
+
+        m.insert(key.to_string(), value);
         rest = new_rest;
-    }
-
-    let even_elements: Vec<serde_json::Value> = v
-        .clone()
-        .into_iter()
-        .enumerate()
-        .filter(|&(i, _)| i % 2 == 0)
-        .map(|(_, e)| e)
-        .collect();
-
-    let odd_elements: Vec<serde_json::Value> = v
-        .clone()
-        .into_iter()
-        .enumerate()
-        .filter(|&(i, _)| i % 2 != 0)
-        .map(|(_, e)| e)
-        .collect();
-
-    let pairs = even_elements.into_iter().zip(odd_elements);
-
-    for p in pairs {
-        m.insert(p.0.to_string(), p.1);
     }
 
     Ok(DecodeResult(serde_json::Value::Object(m), &rest[1..]))
