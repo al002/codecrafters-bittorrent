@@ -1,87 +1,63 @@
-use serde_json::{self, Number, Value};
+use serde_json;
 use std::env;
+use anyhow::{Result, Ok, anyhow};
 
 // Available if you need it!
 // use serde_bencode;
 
-fn decode_string_value(encoded_value: &str) -> serde_json::Value {
+fn decode_string_value(encoded_value: &str) -> Result<(serde_json::Value, &str),  anyhow::Error> {
     // Example: "5:hello" -> "hello"
-    let colon_index = encoded_value.find(':').unwrap();
-    let number_string = &encoded_value[..colon_index];
-    let number = number_string.parse::<i64>().unwrap();
-    let string = &encoded_value[colon_index + 1..colon_index + 1 + number as usize];
-    return serde_json::Value::String(string.to_string());
-}
 
-fn decode_integer_value(encoded_value: &str) -> serde_json::Value {
-    let i = &encoded_value[1..encoded_value.len() - 1];
+    match encoded_value.split_once(":") {
+        Some((size, rest)) => {
+            let size = size.parse::<usize>().map_err(|_| anyhow!("Invalid size: {}", size))?;
 
-    let n: Number;
-    if i.chars().next().unwrap() == '-' {
-        n = Number::from(i.parse::<i64>().unwrap());
-    } else {
-        n = Number::from(i.parse::<u64>().unwrap());
+            let (word, rest) = rest.split_at(size);
+            return Ok((word.into(), rest));
+        },
+        None => Err(anyhow!("Invalid bencode syntax: {}", encoded_value)),
     }
-
-    return serde_json::Value::Number(n);
 }
 
-fn decode_list_value(encoded_value: &str) -> serde_json::Value {
-    let mut content = &encoded_value[1..encoded_value.len() - 1];
+fn decode_integer_value(encoded_value: &str) -> Result<(serde_json::Value, &str),  anyhow::Error> {
+    match encoded_value.split_at(1).1.split_once('e') {
+        Some((n, rest)) => {
+            let n = n.parse::<i64>()?;
+            return Ok((serde_json::Value::Number(n.into()), rest));
+        },
+        None => Err(anyhow!("Invalid bencode syntax: {}", encoded_value)),
+    }
+}
+
+fn decode_list_value(encoded_value: &str) -> Result<(serde_json::Value, &str),  anyhow::Error> {
+    let mut rest = &encoded_value[1..];
 
     let mut v = vec![];
 
-    while let Some(next_char) = content.chars().next() {
+    while let Some(next_char) = rest.chars().next() {
         if next_char == 'e' {
-            break;
+            return Ok((serde_json::Value::Array(v), &rest[1..]));
         }
 
-        match next_char {
-            n if n.is_digit(10) => {
-                let decoded = decode_string_value(content);
-                v.push(decoded.clone());
-                if let Value::String(s) = decoded {
-                    content = &content[s.len() + 2..];
-                }
-            }
-            'i' => {
-                let decoded = decode_integer_value(content);
-                v.push(decoded.clone());
-
-                if let Value::Number(n) = decoded {
-                    if n.is_i64() {
-                        if let Some(i) = n.as_i64() {
-                            content = &content[i.to_string().len() + 2..];
-
-                        }
-                    } else if n.is_u64() {
-                        if let Some(u) = n.as_i64() {
-                            content = &content[u.to_string().len() + 2..];
-
-                        }
-                    }
-                }
-            }
-            _ => {
-                panic!("Unhandled encoded value: {}", encoded_value);
-            }
-        }
+        let (decoded_value, new_rest) = decode_bencoded_value(rest)?;
+        v.push(decoded_value);
+        rest = new_rest;
     }
 
-    return serde_json::Value::Array(v);
+    Err(anyhow!(
+        "Invalid bencode syntax: list not terminated with 'e'"
+    ))
 }
 
 #[allow(dead_code)]
-fn decode_bencoded_value(encoded_value: &str) -> serde_json::Value {
+fn decode_bencoded_value(encoded_value: &str) -> Result<(serde_json::Value, &str)> {
     // If encoded_value starts with a digit, it's a number
     let next_char = encoded_value.chars().next().unwrap();
     match next_char {
         n if n.is_digit(10) => decode_string_value(encoded_value),
         'i' => decode_integer_value(encoded_value),
         'l' => decode_list_value(encoded_value),
-        _ => {
-            panic!("Unhandled encoded value: {}", encoded_value)
-        }
+        _ => Err(anyhow!("Invalid bencode syntax: {}", encoded_value)),
     }
 }
 
@@ -96,7 +72,7 @@ fn main() {
         // Uncomment this block to pass the first stage
         let encoded_value = &args[2];
         let decoded_value = decode_bencoded_value(encoded_value);
-        println!("{}", decoded_value.to_string());
+        println!("{}", decoded_value.expect("String").0.to_string());
     } else {
         println!("unknown command: {}", args[1])
     }
