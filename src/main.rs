@@ -30,6 +30,14 @@ impl Torrent {
     fn encoded_info(&self) -> anyhow::Result<Vec<u8>> {
         Ok(serde_bencode::to_bytes(&self.info)?)
     }
+
+    fn pieces_hash(&self) -> Vec<String> {
+        self.info
+            .pieces
+            .chunks(20)
+            .map(|item| hex::encode(item))
+            .collect()
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -77,7 +85,7 @@ fn serialize_pieces<S>(pieces: &[u8], serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
-    serializer.serialize_bytes(pieces)
+    serializer.serialize_bytes(&pieces)
 }
 
 fn decode_string_value(encoded_value: &[u8]) -> Result<DecodeResult, Error> {
@@ -212,6 +220,12 @@ fn main() {
             println!("Tracker URL: {}", torrent.announce);
             println!("Length: {}", length.unwrap());
             println!("Info Hash: {}", torrent.hash_info().unwrap());
+            println!("Piece Length: {}", torrent.info.piece_length);
+            println!("Piece Hashes:");
+
+            for i in torrent.pieces_hash() {
+                println!("{}", i);
+            }
         }
     } else {
         println!("unknown command: {}", args[1])
@@ -219,7 +233,6 @@ fn main() {
 }
 
 // If encode by ourself, we need to implement things like serde_bencode, and decode should not use serde_json, because content may not be valid utf-8, json string value must be a String type(therefore valid utf-8), we need keep bytes
-
 
 // fn encode_integer_value(decoded_value: i64) -> Vec<u8> {
 //     let mut output: Vec<u8> = vec![];
