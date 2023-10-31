@@ -2,7 +2,7 @@ use anyhow::{anyhow, Error, Result};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_bytes::ByteBuf;
 use serde_json::{self, Map};
-use std::{env, fs, path::Path, str};
+use std::{env, fs, path::Path, str, net::Ipv4Addr};
 
 // Available if you need it!
 // use serde_bencode;
@@ -14,7 +14,7 @@ struct Torrent {
 }
 
 impl Torrent {
-    pub fn hash_info(&self) -> anyhow::Result<String> {
+    pub fn hash_info(&self) -> anyhow::Result<[u8; 20]> {
         use sha1::{Digest, Sha1};
 
         let info = self.encoded_info()?;
@@ -22,9 +22,9 @@ impl Torrent {
 
         hasher.update(&info);
 
-        let result = hasher.finalize();
+        let hash: [u8; 20] = hasher.finalize().try_into().unwrap();
 
-        Ok(hex::encode(&result[..]))
+        Ok(hash)
     }
 
     fn encoded_info(&self) -> anyhow::Result<Vec<u8>> {
@@ -37,6 +37,13 @@ impl Torrent {
             .chunks(20)
             .map(|item| hex::encode(item))
             .collect()
+    }
+
+    fn length(&self) -> Option<usize> {
+        match self.info.keys {
+            Keys::SingleFile { length } => Some(length),
+            _ => None,
+        }
     }
 }
 
@@ -70,6 +77,18 @@ struct File {
     path: Vec<String>,
 }
 
+#[derive(Deserialize, Debug)]
+pub struct TrackerResponse {
+    #[serde(deserialize_with = "deserialize_peers")]
+    pub peers: Vec<Peer>,
+}
+
+#[derive(Debug)]
+pub struct Peer {
+    pub ip: Ipv4Addr,
+    pub port: u16,
+}
+
 struct DecodeResult<'a>(serde_json::Value, &'a [u8]);
 
 fn deserialize_pieces<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
@@ -86,6 +105,25 @@ where
     S: Serializer,
 {
     serializer.serialize_bytes(&pieces)
+}
+
+fn deserialize_peers<'de, D>(deserializer: D) -> Result<Vec<Peer>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let buf: ByteBuf = Deserialize::deserialize(deserializer)?;
+
+    let peers = buf.chunks_exact(6).map(|chunk| {
+        let ip = Ipv4Addr::new(chunk[0], chunk[1], chunk[2], chunk[3]);
+        let port = u16::from_be_bytes([chunk[4], chunk[5]]);
+
+        Peer {
+            ip,
+            port,
+        }
+    }).collect::<Vec<Peer>>();
+
+    Ok(peers)
 }
 
 fn decode_string_value(encoded_value: &[u8]) -> Result<DecodeResult, Error> {
@@ -190,15 +228,37 @@ fn parse_torrent(file_path: &Path) -> Result<Torrent, Error> {
         Ok(data) => {
             let torrent = serde_bencode::from_bytes::<Torrent>(&data).unwrap();
 
-            println!("info hash: {}", torrent.hash_info().unwrap());
             return Ok(torrent);
         }
         Err(_) => Err(anyhow!("file not exists: {}", file_path.to_str().unwrap())),
     }
 }
 
+fn urlencode_bytes(v: &[u8; 20]) -> String {
+    let mut encoded = String::with_capacity(3 * v.len());
+    for &b in v {
+        encoded.push('%');
+        encoded.push_str(&hex::encode([b]));
+    }
+    encoded
+}
+
+async fn request_tracker(p: String) {
+    if let Ok(torrent) = parse_torrent(Path::new(&p)) {
+        let urlencoded_infohash = urlencode_bytes(&torrent.hash_info().unwrap());
+        let url = format!("{}?info_hash={}&peer_id={}&port=6881&uploaded=0&downloaded=0&left={}&compact=1", torrent.announce, urlencoded_infohash, "00112233445566778899", torrent.length().unwrap());
+        let res = reqwest::get(url).await.unwrap();
+        let body = res.bytes().await.unwrap();
+        let response = serde_bencode::from_bytes::<TrackerResponse>(&body).unwrap();
+        for peer in response.peers {
+            println!("{}:{}", peer.ip, peer.port);
+        }
+    }
+}
+
 // Usage: your_bittorrent.sh decode "<encoded_value>"
-fn main() {
+#[tokio::main]
+async fn main() {
     let args: Vec<String> = env::args().collect();
     let command = &args[1];
 
@@ -212,14 +272,9 @@ fn main() {
     } else if command == "info" {
         let p = &args[2];
         if let Ok(torrent) = parse_torrent(Path::new(p)) {
-            let length = match torrent.info.keys {
-                Keys::SingleFile { length } => Some(length),
-                _ => None,
-            };
-
             println!("Tracker URL: {}", torrent.announce);
-            println!("Length: {}", length.unwrap());
-            println!("Info Hash: {}", torrent.hash_info().unwrap());
+            println!("Length: {}", torrent.length().unwrap());
+            println!("Info Hash: {}", hex::encode(torrent.hash_info().unwrap()));
             println!("Piece Length: {}", torrent.info.piece_length);
             println!("Piece Hashes:");
 
@@ -227,8 +282,11 @@ fn main() {
                 println!("{}", i);
             }
         }
+    } else if command == "peers" {
+        let p = &args[2];
+        request_tracker(p.to_string().clone()).await;
     } else {
-        println!("unknown command: {}", args[1])
+        println!("unknown command: {}", args[1]);
     }
 }
 
